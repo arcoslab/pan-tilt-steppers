@@ -1,7 +1,6 @@
 ##
-## This file is part of the libopencm3 project.
-##
 ## Copyright (C) 2009 Uwe Hermann <uwe@hermann-uwe.de>
+## Copyright (C) 2017 Ariel Mora <ariel.moraj@gmail.com>
 ##
 ## This library is free software: you can redistribute it and/or modify
 ## it under the terms of the GNU Lesser General Public License as published by
@@ -17,14 +16,17 @@
 ## along with this library.  If not, see <http://www.gnu.org/licenses/>.
 ##
 
-BINARY = pantilt
+## put your main source file here
+BINARY = pantilt2
 
-OBJS :=
+## put your project objects
+SRC :=
 
-LDSCRIPT = ../libopencm3-plus/lib/libopencm3_plus_stm32f3discovery.ld
-
+## put the correct interface and board
 OOCD_INTERFACE = stlink-v2
-OOCD_BOARD = stm32f3discovery
+OOCD_BOARD = stm32f4discovery
+
+## put the linker script of your board
+LDSCRIPT = ../libopencm3-plus/lib/libopencm3_plus_$(OOCD_BOARD).ld
 
 include ../Makefile.include
-
