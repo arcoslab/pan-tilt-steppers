@@ -16,20 +16,25 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
+/*LibOpenCm3 libraries*/
 #include <libopencm3/stm32/f4/rcc.h>
 #include <libopencm3/stm32/f4/gpio.h>
 #include <libopencm3/stm32/f4/timer.h>
 #include <libopencm3/stm32/f4/nvic.h>
-#include "pantilt2.h"
+
+
+/*LibOpenCm3 libraries*/
 #include <libopencm3-plus/newlib/syscall.h>
 #include <libopencm3-plus/cdcacm_one_serial/cdcacm.h>
-#include <stdio.h>
 #include <libopencm3-plus/utils/misc.h>
 #include <libopencm3-plus/stm32f4discovery/leds.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
+
+#include "pantilt2.h"
 
 #define ABS(x) ((x > 0)? x : x*-1)
 
@@ -65,14 +70,7 @@
 
 /* Freq values
     
-    Timer exception -> run at 8 KHz
-
-    Timer count relation -> TMR_CNT / 8
-
-    Working Freq:   -> 16 runs at 500 Hz
-                             -> 12 runs at 666 Hz lml
-                             -> 8   runs at 1 KHz
-
+    Timer exception -> run at 16 KHz
 */
 
 int serial_ready = 0;
@@ -90,17 +88,17 @@ int calibrate = 0;      //execute calibration function command
 
 /* flags */
 int calibrated = 0;         //indicates if motor has been calibrated with init position
-int vnula = 1;              //indicates velocity is zero after decreasing for a direction change
+int vnull = 1;              //indicates velocity is zero after decreasing for a direction change
 int change_dir = 0;         //indicates that the direction has changed and is not yet applied to motor
-int final_carrera_j1 = 0;   //indicates maximum position limit reached
+int calibration_limit_j1 = 0;   //indicates calibration limit reached
 int step_j1 = 0;            //indicates step status is still high
 
 /* vars */
 int curr_pos_j1 = 0;        //indicates current position of motor
-int targ_pos_j1 = 0;        //indicates currently commanded position
+int targ_pos_j1 = 0;        //indicates currently targeted position
 int deltav_j1 = 0;          //amount of difference between current and desired speed
-int velocidad_j1 = 0;       //current speed
-int vel_target_j1 = 0;      //indicates currently commanded position
+int velocity_j1 = 0;       //current speed
+int vel_target_j1 = 0;      //indicates currently targeted velocity
 int dir_j1 = 0;             //indicates current direction sent to motor
 int targ_dir_j1 = 0;        //indicates desired direction 
 int tim_target_j1 = 16;     //amount of interruptions needed to send step
@@ -114,7 +112,7 @@ int dir_tmp_j1 = 0;         //storage for desired direction while speed decrease
 /* counters */
 int tim_count_j1 = 0;       //curr amount of interruptions to next step
 int step_j1_count = 0;      //curr amount of interruptions to lower step 
-int step_j1_vel_count = 0;  //curr amount of steps to change velocity ***********cambiar
+int step_j1_vel_count = 0;  //curr amount of interruptions to change velocity 
 
 
 int prev_pos_j1 = 0;        //
@@ -126,15 +124,9 @@ void leds_init(void) {
 }
 
 void gpio_init(void) {
-    // Enable clocks  
-    /* Nothing to do here */
 
-    //enable gpios
     gpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO6 | GPIO7 | GPIO10);
     gpio_mode_setup(GPIOD, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, GPIO3);
-    //gpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO12);
-
-    //set open drain conf
     gpio_set_output_options(GPIOD, GPIO_OTYPE_OD, GPIO_OSPEED_25MHZ, GPIO6 | GPIO7 | GPIO10);
 }
 
@@ -276,45 +268,55 @@ void system_init(void) {
 
 /* End configuration functions */
 
-/* Init contron functions */
+/* Init control functions */
+
+
+/*calibration 
+
+Rotates the motor towards a direction (which, once calibrated, would be decreasing position). It will rotate with a fixed velocity until it receives a 'high' in its input pin which indicates that the movement has reached its limit. When that happens, the position is marked as zero and the motor stops rotating */
 
 void calibration_j1(void) {
-    velocidad_j1 = DELTAVEL_LIM;
-    tim_target_j1 = TIM_TARGET / velocidad_j1;
+    velocity_j1 = DELTAVEL_LIM;
+    tim_target_j1 = TIM_TARGET / velocity_j1; //indicates how many interuption cycles have to be completed to send a step signal
     dir_j1 = 1;
-    //mandar un high al GPIO de DIR
-    gpio_clear(DIR_PORT, DIR_PIN);
+    gpio_clear(DIR_PORT, DIR_PIN);  //sends a 'high' to the dir GPIO
     if (tim_count_j1 == tim_target_j1) {
         step_j1 = 1;
-        //mandar high al GPIO de step
-        gpio_clear(STEP_PORT, STEP_PIN);
+        gpio_clear(STEP_PORT, STEP_PIN); // sends a 'high' to the step GPIO
         tim_count_j1 = 0;
     }
     else{
         if (tim_count_j1 > STEP_LIMIT){ 
             step_j1 = 0;
-            //mandar low al GPIO de step
-            gpio_set(STEP_PORT, STEP_PIN);
+            gpio_set(STEP_PORT, STEP_PIN); // sends a 'low' to the step GPIO
         }
         tim_count_j1 += 1;
     }
-    final_carrera_j1 = gpio_get(CAL_PORT, CAL_PIN);//leer senal de GPIO de fin de carrera y guardarlo en final_carrera_j1
-    if (final_carrera_j1){
-        velocidad_j1 = 0;
+    calibration_limit_j1 = gpio_get(CAL_PORT, CAL_PIN);//reads the state in the calibration limit GPIO
+    if (calibration_limit_j1){
+        velocity_j1 = 0;
         curr_pos_j1 = 0;
         calibrated = 1;
         calibrate = 0;
 	    step_j1_count = 1;
         tim_count_j1 = 0;
         step_j1 = 0;
-        /*para preparar para el control P para posicion inicial*/
+        /*variables and flags to set the initial position to 10*/
         //ctrl_type = 'p';
         //targ_pos_j1 = 10;
         //vel_target_j1 = DELTAVEL_LIM;
     }
 }
 
-void bajar_step(void){
+/*
+lower_step
+
+Lowers the step signal, when operating after the calibration has been completed.
+
+*/
+
+
+void lower_step(void){
     if (step_j1 == 1 && step_j1_count == STEP_LIMIT){
         gpio_clear(STEP_PORT, STEP_PIN);
         #ifdef DEBUG
@@ -325,18 +327,24 @@ void bajar_step(void){
     }
 }
 
-void calculo_step_j1(void) {    
-    tim_target_j1 = (int) (velocidad_j1 > 0)? TIM_TARGET / velocidad_j1 : 0;
+/*
+set_step
+
+Determines how many interruption cycles have to be completed to send a step signal. When said quantity of steps have been fullfilled sets the step pin in 'high' 
+*/
+
+
+void set_step_j1(void) {    
+    tim_target_j1 = (int) (velocity_j1 > 0)? TIM_TARGET / velocity_j1 : 0; //indicates how many interuption cycles have to be completed to send a step signal
     if (tim_target_j1 != 0){
-        final_carrera_j1 = gpio_get(CAL_PORT, CAL_PIN);        
-        if (final_carrera_j1) {
+        calibration_limit_j1 = gpio_get(CAL_PORT, CAL_PIN);        
+        if (calibration_limit_j1) {
             tim_count_j1 = 0;
         }
-        if (tim_count_j1 >= tim_target_j1) { //revisar si hay que poner como mayor o igual que tim.targ
+        if (tim_count_j1 >= tim_target_j1) {
             step_j1 = 1;
 			step_j1_count = 1;
-            //mandar high a salida GPIO de STEP
-            gpio_set(STEP_PORT, STEP_PIN);
+            gpio_set(STEP_PORT, STEP_PIN); //sends a 'high' to the step GPIO
             #ifdef DEBUG
             gpio_set(GPIOD, GPIO14);
             #endif
@@ -352,39 +360,17 @@ void calculo_step_j1(void) {
 		else {
 			step_j1_count++;
 		}
-        //if (!limit_pos) {
         tim_count_j1 += 1;
-        //revisar como hacer que step_j1, step_count_j1 y tim_count_j1 queden en cero cuando no hay velocidad
-        //}
     }
 }
 
 /*
-void decr_velocidad_j1(void){
-    if (velocidad_j1 > DELTAVEL_STEP){
-        if (step_j1 == 1 && step_j1_vel_count >= STEP_VEL_LIMIT){
-            velocidad_j1 -= DELTAVEL_STEP;
-            step_j1_vel_count = 0;
-        }
-    }
-    else{
-        if (step_j1 == 1 && step_j1_vel_count >= STEP_VEL_LIMIT){
-            velocidad_j1 = 0;
-            step_j1_vel_count = 0;
-            vnula = 1;
-        }
-    }
-    if (vnula == 1 && change_dir == 1){
-        dir_j1 = dir_tmp_j1;
-        targ_dir_j1 = dir_tmp_j1;
-        change_dir = 0;
-        step_j1_vel_count = 0;
-    }
-    step_j1_vel_count += 1;
-}
+establish_direction
+
+Outputs a 'high' or a 'low' in the direction control pin depending on the control value.
 */
 
-void establecer_direccion(void){
+void establish_direction(void){
     if (dir_j1 == 1){
         //mandar un high al GPIO de DIR
         gpio_clear(DIR_PORT, DIR_PIN);
@@ -395,51 +381,59 @@ void establecer_direccion(void){
     }
 }
 
+/*
+change_velocity
 
-void cambiar_velocidad(void){
-    deltav_j1 = vel_target_j1 - velocidad_j1;
+Determines what the difference is between the actual rotation velocity and the target velocity. Then, if there's a difference it will change the value of the velocity to either the target velocity, or a speed closer to the target. It also determines if the desacceleration after a change of movement direction has been completed.
+*/
+
+void change_velocity(void){
+    deltav_j1 = vel_target_j1 - velocity_j1;
     if (ABS(deltav_j1) > DELTAVEL_STEP){
-        if (step_j1_count == 1 && step_j1_vel_count >= tim_target_j1 * STEP_DOWNS){
-            velocidad_j1 += (deltav_j1 > 0)? DELTAVEL_STEP : (DELTAVEL_STEP * -1);
+        if (step_j1_count == 1 && step_j1_vel_count >= tim_target_j1 * STEP_DOWNS){ //a counter ensures that the velocity changes are executed every determined number of steps
+            velocity_j1 += (deltav_j1 > 0)? DELTAVEL_STEP : (DELTAVEL_STEP * -1);
             step_j1_vel_count = 0;
 			if (ctrl_type == 'p'){
-				check_velocidad_pos();
+				check_velocity_pos();
     		}
 			if (ctrl_type == 'v'){
-				check_velocidad();
+				check_velocity_vel();
     		}
         }
     }
     else{
-        if (step_j1_count == 1 && step_j1_vel_count >= tim_target_j1 * STEP_DOWNS){
-            velocidad_j1 = vel_target_j1;
+        if (step_j1_count == 1 && step_j1_vel_count >= tim_target_j1 * STEP_DOWNS){ //a counter ensures that the velocity changes are executed every determined number of steps
+            velocity_j1 = vel_target_j1;
             step_j1_vel_count = 0;
-            //vnula = (change_dir)? 1 : 0;
-            vnula = (vel_target_j1 == 0)? 1 : 0;
+            vnull = (vel_target_j1 == 0)? 1 : 0;
 			if (ctrl_type == 'p'){
-				check_velocidad_pos();
+				check_velocity_pos();
     		}
 			if (ctrl_type == 'v'){
-				check_velocidad();
+				check_velocity_vel();
     		}
         }
     }
-    if (vnula && change_dir){
+    if (vnull && change_dir){ //if there is a change in direction taking place, and the velocity is null, the deacceleration has finished
         dir_j1 = dir_tmp_j1;
         targ_dir_j1 = dir_tmp_j1;
         change_dir = 0;
         step_j1_vel_count = 0;
         vel_target_j1 = vel_temp_j1;
-        vnula = 0;
+        vnull = 0;
     }
     step_j1_vel_count += 1;
 }
 
-/* CHECK THIS FUNCTION NOW!!! */
-void check_velocidad(void){
+/*
+check velocity
+
+Determines if, given the current velocity, and while in velocity control mode, the motor needs to start deaccelerating to stop at the absolute maximum or minimum limits.
+*/
+void check_velocity_vel(void){
     if (calibrated){
-        remaining_steps = (int) ceil((float) velocidad_j1 / (float) DELTAVEL_STEP);
-        steps_to_limit = (int) (dir_j1 == 0)? floor((MAX_LIMIT_POS - curr_pos_j1) / STEP_DOWNS) : ceil((curr_pos_j1 - MIN_LIMIT_POS) / STEP_DOWNS);
+        remaining_steps = (int) ceil((float) velocity_j1 / (float) DELTAVEL_STEP); // determines hoy many velocity changes are needed to stop moving
+        steps_to_limit = (int) (dir_j1 == 0)? floor((MAX_LIMIT_POS - curr_pos_j1) / STEP_DOWNS) : ceil((curr_pos_j1 - MIN_LIMIT_POS) / STEP_DOWNS); //determines how many multiples of the quantity of steps between every velocity change, are there between the current position and the maximum or minimum limit.
         vel_target_j1 = (remaining_steps >= (steps_to_limit))? vel_target_j1 - DELTAVEL_STEP : vel_target_j1;	
         #ifdef DEBUG
         if (vel_target_j1 == 0){
@@ -452,19 +446,22 @@ void check_velocidad(void){
     }
 }
 
+/*
+check_velocity_pos
 
-void check_velocidad_pos(void){
+Determines if, given the current velocity, and while in position control mode, the motor needs to start deaccelerating to stop at the target position.
+*/
+
+void check_velocity_pos(void){
     if (calibrated){
-        remaining_steps = (int) ceil((float) velocidad_j1 / (float) DELTAVEL_STEP);
+        remaining_steps = (int) ceil((float) velocity_j1 / (float) DELTAVEL_STEP);// determines hoy many velocity changes are needed to stop moving
         if (change_dir == 0){
-            steps_to_limit = (int) (dir_j1 == 0)? floor((targ_pos_j1 - curr_pos_j1) / STEP_DOWNS) : ceil((curr_pos_j1 - targ_pos_j1) / STEP_DOWNS);
+            steps_to_limit = (int) (dir_j1 == 0)? floor((targ_pos_j1 - curr_pos_j1) / STEP_DOWNS) : ceil((curr_pos_j1 - targ_pos_j1) / STEP_DOWNS);//determines how many multiples of the quantity of steps between every velocity change, are there between the current position and the target position, if no change in rotation sense is detected.
         }
         else {
-            steps_to_limit = (int) (dir_j1 == 1)? floor((targ_pos_j1 - curr_pos_j1) / STEP_DOWNS) : ceil((curr_pos_j1 - targ_pos_j1) / STEP_DOWNS);
+            steps_to_limit = (int) (dir_j1 == 1)? floor((targ_pos_j1 - curr_pos_j1) / STEP_DOWNS) : ceil((curr_pos_j1 - targ_pos_j1) / STEP_DOWNS);//determines how many multiples of the quantity of steps between every velocity change, are there between the current position and the target position, if a change in rotation sense is ongoing.
         }
-	    //if (ABS(targ_pos_j1 - curr_pos_j1) > (2*STEP_DOWNS)) { Control FINE
-            vel_target_j1 = ((remaining_steps) >= (ABS(steps_to_limit)+1))? velocidad_j1 - DELTAVEL_STEP : vel_target_j1;
-	    //}
+            vel_target_j1 = ((remaining_steps) >= (ABS(steps_to_limit)+1))? velocity_j1 - DELTAVEL_STEP : vel_target_j1;
         #ifdef DEBUG
         if (vel_target_j1 == 0){
             gpio_set(GPIOD, GPIO12);
@@ -476,91 +473,71 @@ void check_velocidad_pos(void){
     }
 }
 
+/*
+position_control
 
+Sets the required variables for position control mode operation. Checks if a change in rotation direction happens so that the motor deaccelerates in the current direction.
+*/
 
-void control_posicion(void){
-    /*if (vnula == 0){ //si hay velocidad/movimiento
-        vel_target_j1 = 0;
-    }
-    else{*/ //si no hay velocidad/movimiento
-	    //velocidad_j1 = DELTAVEL_LIM;
-        //vel_target_j1 = DELTAVEL_LIM;
+void position_control(void){
     if (dir_j1 != targ_dir_j1){
         dir_tmp_j1 = targ_dir_j1;
         targ_dir_j1 = dir_j1;
         change_dir = 1;
         vel_temp_j1 = vel_target_j1;
         vel_target_j1 = 0;
-        //vnula = 0;
     }
     else{
-        //vnula = 0;
-        /*if (ABS(targ_pos_j1 - curr_pos_j1) <= (2*STEP_DOWNS)) {       Control FINE
-            velocidad_j1 = DELTAVEL_STEP;
-            vel_target_j1 = DELTAVEL_STEP;
-        }*/
         if (curr_pos_j1 > targ_pos_j1 && change_dir != 1){
-           //mandar un high al GPIO de DIR
             targ_dir_j1 = 1;
         }
         else if (curr_pos_j1 < targ_pos_j1 && change_dir != 1){
-            //mandar un low al GPIO de DIR
             targ_dir_j1 = 0;
         }
         else if(curr_pos_j1 == targ_pos_j1){
-            velocidad_j1 = 0;
+            velocity_j1 = 0;
             vel_target_j1 = 0;
             tim_count_j1 = 1;
         }
     }
-    //}
 }
 
-void control_velocidad(void){
+/*
+velocity_control
+
+Sets the required variables for velocity control mode operation. Checks if a change in rotation direction happens so that the motor deaccelerates in the current direction. Stops the rotation entirely if a maximum or minimum limit is reached.
+*/
+
+void velocity_control(void){
     if (dir_j1 != targ_dir_j1){
         dir_tmp_j1 = targ_dir_j1;
         targ_dir_j1 = dir_j1;
         change_dir = 1;
         vel_temp_j1 = vel_target_j1;
         vel_target_j1 = 0;
-        //vnula = 0;
     }
     else{
-        //vnula = 0;
-	    if ((velocidad_j1 != 0) && (curr_pos_j1 == MAX_LIMIT_POS) && (dir_j1 == 0)){
-	        velocidad_j1 = 0;
+	    if ((velocity_j1 != 0) && (curr_pos_j1 == MAX_LIMIT_POS) && (dir_j1 == 0)){
+	        velocity_j1 = 0;
 		}
-		if ((velocidad_j1 != 0) && (curr_pos_j1 == MIN_LIMIT_POS) && (dir_j1 == 1)){
-			velocidad_j1 = 0;
+		if ((velocity_j1 != 0) && (curr_pos_j1 == MIN_LIMIT_POS) && (dir_j1 == 1)){
+			velocity_j1 = 0;
 		}
     }
-    /*if (vnula == 0){ //si hay velocidad/movimiento
-        decr_velocidad_j1();
-    }*/
-    //else if (vnula){ //si no hay velocidad/movimiento
-        //deltav_j1 = vel_target_j1 - velocidad_j1;
-        //velocidad_j1 = vel_target_j1;
-        /*if (ABS(deltav_j1) > DELTAVEL_STEP){
-            if (step_j1 == 1 && step_j1_vel_count >= STEP_VEL_LIMIT){
-                velocidad_j1 += DELTAVEL_STEP;
-                step_j1_vel_count = 0;
-            }
-        }
-        else if (step_j1 == 1 && step_j1_vel_count >= STEP_VEL_LIMIT) {
-            velocidad_j1 = vel_target_j1;
-            step_j1_vel_count = 0;
-        }
-        step_j1_vel_count += 1;*/
-    //}
 }
 
 /* End control functions */
 
 /* Init timer functions */
 
+/*
+tim1_up_tim10_isr
+
+Executes the time based interruption.
+*/
+
 void tim1_up_tim10_isr(void) {
-    // Clear the update interrupt flag
-    timer_clear_flag(TIM1,  TIM_SR_UIF);
+    timer_clear_flag(TIM1,  TIM_SR_UIF); // Clear the update interrupt flag
 
     if (enbl == 1){
         gpio_set(EN_PORT, EN_PIN);
@@ -581,44 +558,20 @@ void tim1_up_tim10_isr(void) {
         calibration_j1();
     }
 
-    // Init position control
     if (ctrl_type == 'p'){
-        control_posicion();
+        position_control();
     }
 
     if (ctrl_type == 'v'){
-        control_velocidad();
+        velocity_control();
     }
 
     if (calibrated){
-        establecer_direccion();
-        bajar_step();
-        calculo_step_j1();
-        cambiar_velocidad();
+        establish_direction();
+        lower_step();
+        set_step_j1();
+        change_velocity();
     }
-
-    //logica del control
-    /*
-    if(enbl == 1){// cambiar enbl a disable 
-        //mandar un high al GPIO de ENBL
-        gpio_clear(EN_PORT, EN_PIN);
-    }
-    if((calibrate == 1) || (calibrated == 0)){
-        calibration_j1();
-    }  
-    else{
-        // Init position control
-        if(crtl_type == p){
-            control_posicion();
-        }
-        //Init velocity control
-        if(ctrl_type == v){
-            control_velocidad();
-        }
-        establecer_direccion();
-        calculo_step_j1();
-    }
-    */
 }
 
 /* End timer functions */
@@ -643,6 +596,12 @@ void read_serial(char* buffer){
 
 /* Main function */
 
+/*
+main
+
+Polls the PC via serial communication to set the control variables needed to determine the operation of the control.
+*/
+
 int main(void){
     char cmd_s[MSG_SIZE]=" ";
     system_init();
@@ -654,7 +613,7 @@ int main(void){
     enbl = 0;
     denbl = 0;
     dir = 0;
-    vnula = 1;
+    vnull = 1;
     change_dir = 0;
     dir_j1 = 0;
     dir_tmp_j1 = 0;
@@ -688,22 +647,23 @@ int main(void){
 	        }
 
             ctrl_type = 't';
-
+			
+			//sets variables to execute position control
             if (ctrl_sel == 'p') {
                 ctrl_type = ctrl_sel;
                 targ_pos_j1 = val1;
                 vel_target_j1 = DELTAVEL_LIM;
-            }        
-
+            }   
+			
+			//sets variables to execute velocity control
             if (ctrl_sel == 'v') {
                 ctrl_type = ctrl_sel;
                 vel_target_j1 = val1;
                 targ_dir_j1 = val2; 
             }
         }
-    	printf("step: %d vel_j1: %d remaining_steps: %d steps_to_limit %d curr_pos: %d change_dir: %d vel_target: %d \n", step_j1, velocidad_j1, remaining_steps, steps_to_limit, curr_pos_j1, change_dir, vel_target_j1);
+    	printf("step: %d vel_j1: %d remaining_steps: %d steps_to_limit %d curr_pos: %d change_dir: %d vel_target: %d \n", step_j1, velocity_j1, remaining_steps, steps_to_limit, curr_pos_j1, change_dir, vel_target_j1);
     }
-    //incluir en el main el empujon inicial de step_j1, step_j1_count y tim_count_j1
     return(0);
 }
 
