@@ -22,17 +22,16 @@
 #include <libopencm3/stm32/f4/timer.h>
 #include <libopencm3/stm32/f4/nvic.h>
 
-
 /*LibOpenCm3 libraries*/
 #include <libopencm3-plus/newlib/syscall.h>
 #include <libopencm3-plus/cdcacm_one_serial/cdcacm.h>
 #include <libopencm3-plus/utils/misc.h>
 #include <libopencm3-plus/stm32f4discovery/leds.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <stdio.h>
 
 #include "pantilt2.h"
 
@@ -42,19 +41,6 @@
 
 #define MSG_SIZE 50
 
-/* Pinout definitions */
-#define STEP_PORT     GPIOD
-#define STEP_PIN        GPIO10//GPIO12
-
-#define DIR_PORT       GPIOD
-#define DIR_PIN          GPIO7
-
-#define EN_PORT         GPIOD
-#define EN_PIN            GPIO6
-
-#define CAL_PORT        GPIOD
-#define CAL_PIN           GPIO3
-
 /* control definitions */
 #define TIM_TARGET 16000
 #define TIM_TARGET_JOINT1 16
@@ -63,17 +49,31 @@
 #define STEP_VEL_LIMIT (STEP_LIMIT * STEP_DOWNS)
 #define DELTAVEL_LIM 500 /* hertz freq */
 #define DELTAVEL_STEP 50 /* hertz freq */
-#define MAX_LIMIT_POS 20000
-#define MIN_LIMIT_POS 10
+
+#define NUM_JOINTS 2
+#define JOINT1 0
+#define JOINT2 1
+
 
 //global variables
 
-/* Freq values
-    
-    Timer exception -> run at 16 KHz
-*/
-
 int serial_ready = 0;
+
+/* Pinout definitions */
+const uint32_t step_port[] = {GPIOD, GPIOD};//substitutes STEP_PORT
+const uint16_t step_pin[] = {GPIO10, GPIO11};//substitutes STEP_PIN
+
+const uint32_t dir_port[] = {GPIOD, GPIOD};//substitutes DIR_PORT
+const uint16_t dir_pin[] = {GPIO7, GPIO8};//substitutes DIR_PIN
+
+const uint32_t en_port[] = {GPIOD, GPIOD};//substitutes EN_PORT
+const uint16_t en_pin[] = {GPIO6, GPIO2};//substitutes EN_PIN
+
+const uint32_t cal_port[] = {GPIOD, GPIOD};//substitutes CAL_PORT 
+const uint16_t cal_pin[] = {GPIO3, GPIO4};//substitutes CAL_PIN 
+
+const int max_limit_pos[] = { 20000, 10000 }; //substitutes MAX_LIMIT_POS
+const int min_limit_pos[] = { 10, 10};        //substitutes MIN_LIMIT_POS
 
 /* command variables */
 char ctrl_type = 't';   //defines type of control
@@ -87,35 +87,35 @@ int calibrate = 0;      //execute calibration function command
 /* control variables */
 
 /* flags */
-int calibrated = 0;         //indicates if motor has been calibrated with init position
-int vnull = 1;              //indicates velocity is zero after decreasing for a direction change
-int change_dir = 0;         //indicates that the direction has changed and is not yet applied to motor
-int calibration_limit_j1 = 0;   //indicates calibration limit reached
-int step_j1 = 0;            //indicates step status is still high
+int calibrated[NUM_JOINTS];         //indicates if motor has been calibrated with init position
+int vnull[NUM_JOINTS] = { 1, 1 };              //indicates velocity is zero after decreasing for a direction change
+int change_dir[NUM_JOINTS];         //indicates that the direction has changed and is not yet applied to motor
+int calibration_limit[NUM_JOINTS];   //indicates maximum position limit reached
+int step_j[NUM_JOINTS];            //indicates step status is still high
 
 /* vars */
-int curr_pos_j1 = 0;        //indicates current position of motor
-int targ_pos_j1 = 0;        //indicates currently targeted position
-int deltav_j1 = 0;          //amount of difference between current and desired speed
-int velocity_j1 = 0;       //current speed
-int vel_target_j1 = 0;      //indicates currently targeted velocity
-int dir_j1 = 0;             //indicates current direction sent to motor
-int targ_dir_j1 = 0;        //indicates desired direction 
-int tim_target_j1 = 16;     //amount of interruptions needed to send step
-int remaining_steps = 0;    //times DELTAVEL_STEP fits into current speed
-int steps_to_limit = 0;     //steps remaining to reach limit pos
+int curr_pos_j1[NUM_JOINTS];        //indicates current position of motor
+int targ_pos_j1[NUM_JOINTS];        //indicates currently commanded position
+int deltav_j1[NUM_JOINTS];          //amount of difference between current and desired speed
+int velocity[NUM_JOINTS];       //current speed
+int vel_target_j1[NUM_JOINTS];      //indicates currently commanded position
+int dir_j1[NUM_JOINTS];             //indicates current direction sent to motor
+int targ_dir_j1[NUM_JOINTS];        //indicates desired direction 
+int tim_target_j1[NUM_JOINTS] = { 16, 16 };     //amount of interruptions needed to send step
+int remaining_steps[NUM_JOINTS];    //times DELTAVEL_STEP fits into current speed
+int steps_to_limit[NUM_JOINTS];     //steps remaining to reach limit pos
 
 /* temp vars */
-int vel_temp_j1 = 0;        //storage for desired speed while speed in opposite direction decreases
-int dir_tmp_j1 = 0;         //storage for desired direction while speed decreases
+int vel_temp_j1[NUM_JOINTS];        //storage for desired speed while speed in opposite direction decreases
+int dir_tmp_j1[NUM_JOINTS];         //storage for desired direction while speed decreases
 
 /* counters */
-int tim_count_j1 = 0;       //curr amount of interruptions to next step
-int step_j1_count = 0;      //curr amount of interruptions to lower step 
-int step_j1_vel_count = 0;  //curr amount of interruptions to change velocity 
+int tim_count_j1[NUM_JOINTS];       //curr amount of interruptions to next step
+int step_j1_count[NUM_JOINTS];      //curr amount of interruptions to lower step 
+int step_j1_vel_count[NUM_JOINTS];  //curr amount of steps to change velocity ***********cambiar
 
 
-int prev_pos_j1 = 0;        //
+int prev_pos_j1[NUM_JOINTS];        //
 
 /* Init configuration functions */
 void leds_init(void) {
@@ -124,10 +124,9 @@ void leds_init(void) {
 }
 
 void gpio_init(void) {
-
-    gpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO6 | GPIO7 | GPIO10);
-    gpio_mode_setup(GPIOD, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, GPIO3);
-    gpio_set_output_options(GPIOD, GPIO_OTYPE_OD, GPIO_OSPEED_25MHZ, GPIO6 | GPIO7 | GPIO10);
+    gpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO2 | GPIO6 | GPIO7 | GPIO8 | GPIO10 | GPIO11);
+    gpio_mode_setup(GPIOD, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, GPIO3 | GPIO4);
+    gpio_set_output_options(GPIOD, GPIO_OTYPE_OD, GPIO_OSPEED_25MHZ, GPIO2 | GPIO6 | GPIO7 | GPIO8 | GPIO10 | GPIO11);
 }
 
 void tim_init(void) {
@@ -270,41 +269,48 @@ void system_init(void) {
 
 /* Init control functions */
 
-
 /*calibration 
 
 Rotates the motor towards a direction (which, once calibrated, would be decreasing position). It will rotate with a fixed velocity until it receives a 'high' in its input pin which indicates that the movement has reached its limit. When that happens, the position is marked as zero and the motor stops rotating */
 
-void calibration_j1(void) {
-    velocity_j1 = DELTAVEL_LIM;
-    tim_target_j1 = TIM_TARGET / velocity_j1; //indicates how many interuption cycles have to be completed to send a step signal
-    dir_j1 = 1;
-    gpio_clear(DIR_PORT, DIR_PIN);  //sends a 'high' to the dir GPIO
-    if (tim_count_j1 == tim_target_j1) {
-        step_j1 = 1;
-        gpio_clear(STEP_PORT, STEP_PIN); // sends a 'high' to the step GPIO
-        tim_count_j1 = 0;
-    }
-    else{
-        if (tim_count_j1 > STEP_LIMIT){ 
-            step_j1 = 0;
-            gpio_set(STEP_PORT, STEP_PIN); // sends a 'low' to the step GPIO
+void calibration(int joint_id) {
+    velocity[joint_id] = DELTAVEL_LIM;
+    tim_target_j1[joint_id] = TIM_TARGET / velocity[joint_id];//indicates how many interuption cycles have to be completed to send a step signal
+    dir_j1[joint_id] = 1;
+    gpio_clear(dir_port[joint_id], dir_pin[joint_id]);//sends a 'high' to the dir GPIO
+    if (!calibrated[joint_id]) {
+        if (tim_count_j1[joint_id] == tim_target_j1[joint_id]) {
+            step_j[joint_id] = 1;
+            gpio_clear(step_port[joint_id], step_pin[joint_id]); // sends a 'high' to the step GPIO
+            tim_count_j1[joint_id] = 0;
         }
-        tim_count_j1 += 1;
+        else{
+            if (tim_count_j1[joint_id] > STEP_LIMIT){ 
+                step_j[joint_id] = 0;
+                gpio_set(step_port[joint_id], step_pin[joint_id]); // sends a 'low' to the step GPIO
+            }
+            tim_count_j1[joint_id] += 1;
+        }
     }
-    calibration_limit_j1 = gpio_get(CAL_PORT, CAL_PIN);//reads the state in the calibration limit GPIO
-    if (calibration_limit_j1){
-        velocity_j1 = 0;
-        curr_pos_j1 = 0;
-        calibrated = 1;
-        calibrate = 0;
-	    step_j1_count = 1;
-        tim_count_j1 = 0;
-        step_j1 = 0;
+    calibration_limit[joint_id] = gpio_get(cal_port[joint_id], cal_pin[joint_id]);//reads the state in the calibration limit GPIO
+    if (calibration_limit[joint_id]){
+        velocity[joint_id] = 0;
+        curr_pos_j1[joint_id] = 0;
+        calibrated[joint_id] = 1;
+	    step_j1_count[joint_id] = 1;
+        tim_count_j1[joint_id] = 0;
+        step_j[joint_id] = 0;
         /*variables and flags to set the initial position to 10*/
-        //ctrl_type = 'p';
-        //targ_pos_j1 = 10;
-        //vel_target_j1 = DELTAVEL_LIM;
+        //ctrl_type[joint_id] = 'p';
+        //targ_pos_j1[joint_id] = 10;
+        //vel_target_j1[joint_id] = DELTAVEL_LIM;
+    }
+    calibrate = 0;
+    int joint;
+    for (joint = 0; joint < NUM_JOINTS; joint++) {
+        if (!calibrated[joint]){
+            calibrate = 1;
+        }
     }
 }
 
@@ -315,15 +321,14 @@ Lowers the step signal, when operating after the calibration has been completed.
 
 */
 
-
-void lower_step(void){
-    if (step_j1 == 1 && step_j1_count == STEP_LIMIT){
-        gpio_clear(STEP_PORT, STEP_PIN);
+void lower_step(int joint_id){
+    if (step_j[joint_id] == 1 && step_j1_count[joint_id] == STEP_LIMIT){
+        gpio_clear(step_port[joint_id], step_pin[joint_id]);
         #ifdef DEBUG
         gpio_clear(GPIOD, GPIO14);
         #endif
-        step_j1 = 0;
-        step_j1_count = 0;
+        step_j[joint_id] = 0;
+        step_j1_count[joint_id] = 0;
     }
 }
 
@@ -333,34 +338,33 @@ set_step
 Determines how many interruption cycles have to be completed to send a step signal. When said quantity of steps have been fullfilled sets the step pin in 'high' 
 */
 
-
-void set_step_j1(void) {    
-    tim_target_j1 = (int) (velocity_j1 > 0)? TIM_TARGET / velocity_j1 : 0; //indicates how many interuption cycles have to be completed to send a step signal
-    if (tim_target_j1 != 0){
-        calibration_limit_j1 = gpio_get(CAL_PORT, CAL_PIN);        
-        if (calibration_limit_j1) {
-            tim_count_j1 = 0;
+void set_step(int joint_id) {    
+    tim_target_j1[joint_id] = (int) (velocity[joint_id] > 0)? TIM_TARGET / velocity[joint_id] : 0; //indicates how many interuption cycles have to be completed to send a step signal
+    if (tim_target_j1[joint_id] != 0){
+        calibration_limit[joint_id] = gpio_get(cal_port[joint_id], cal_pin[joint_id]);        
+        if (calibration_limit[joint_id]) {
+            tim_count_j1[joint_id] = 0;
         }
-        if (tim_count_j1 >= tim_target_j1) {
-            step_j1 = 1;
-			step_j1_count = 1;
-            gpio_set(STEP_PORT, STEP_PIN); //sends a 'high' to the step GPIO
+        if (tim_count_j1[joint_id] >= tim_target_j1[joint_id]) {
+            step_j[joint_id] = 1;
+			step_j1_count[joint_id] = 1;
+            gpio_set(step_port[joint_id], step_pin[joint_id]); //sends a 'high' to the step GPIO
             #ifdef DEBUG
             gpio_set(GPIOD, GPIO14);
             #endif
-            tim_count_j1 = 0;        
+            tim_count_j1[joint_id] = 0;        
 
-            if (dir_j1 == 0){
-                curr_pos_j1 += 1;
+            if (dir_j1[joint_id] == 0){
+                curr_pos_j1[joint_id] += 1;
             }
             else{
-                curr_pos_j1 -= 1;
+                curr_pos_j1[joint_id] -= 1;
             }
         }
 		else {
-			step_j1_count++;
+			step_j1_count[joint_id]++;
 		}
-        tim_count_j1 += 1;
+        tim_count_j1[joint_id] += 1;
     }
 }
 
@@ -370,14 +374,12 @@ establish_direction
 Outputs a 'high' or a 'low' in the direction control pin depending on the control value.
 */
 
-void establish_direction(void){
-    if (dir_j1 == 1){
-        //mandar un high al GPIO de DIR
-        gpio_clear(DIR_PORT, DIR_PIN);
+void establish_direction(int joint_id){
+    if (dir_j1[joint_id] == 1){
+        gpio_clear(dir_port[joint_id], dir_pin[joint_id]);
     }
     else{
-        //mandar un low al GPIO de DIR
-        gpio_set(DIR_PORT, DIR_PIN);
+        gpio_set(dir_port[joint_id], dir_pin[joint_id]);
     }
 }
 
@@ -387,42 +389,42 @@ change_velocity
 Determines what the difference is between the actual rotation velocity and the target velocity. Then, if there's a difference it will change the value of the velocity to either the target velocity, or a speed closer to the target. It also determines if the desacceleration after a change of movement direction has been completed.
 */
 
-void change_velocity(void){
-    deltav_j1 = vel_target_j1 - velocity_j1;
-    if (ABS(deltav_j1) > DELTAVEL_STEP){
-        if (step_j1_count == 1 && step_j1_vel_count >= tim_target_j1 * STEP_DOWNS){ //a counter ensures that the velocity changes are executed every determined number of steps
-            velocity_j1 += (deltav_j1 > 0)? DELTAVEL_STEP : (DELTAVEL_STEP * -1);
-            step_j1_vel_count = 0;
+void change_velocity(int joint_id){
+    deltav_j1[joint_id] = vel_target_j1[joint_id] - velocity[joint_id];
+    if (ABS(deltav_j1[joint_id]) > DELTAVEL_STEP){
+        if (step_j1_count[joint_id] == 1 && step_j1_vel_count[joint_id] >= tim_target_j1[joint_id] * STEP_DOWNS){ //a counter ensures that the velocity changes are executed every determined number of steps
+            velocity[joint_id] += (deltav_j1[joint_id] > 0)? DELTAVEL_STEP : (DELTAVEL_STEP * -1);
+            step_j1_vel_count[joint_id] = 0;
 			if (ctrl_type == 'p'){
-				check_velocity_pos();
+				check_velocity_pos(joint_id);
     		}
 			if (ctrl_type == 'v'){
-				check_velocity_vel();
+				check_velocity(joint_id);
     		}
         }
     }
     else{
-        if (step_j1_count == 1 && step_j1_vel_count >= tim_target_j1 * STEP_DOWNS){ //a counter ensures that the velocity changes are executed every determined number of steps
-            velocity_j1 = vel_target_j1;
-            step_j1_vel_count = 0;
-            vnull = (vel_target_j1 == 0)? 1 : 0;
+        if (step_j1_count[joint_id] == 1 && step_j1_vel_count[joint_id] >= tim_target_j1[joint_id] * STEP_DOWNS){ //a counter ensures that the velocity changes are executed every determined number of steps
+            velocity[joint_id] = vel_target_j1[joint_id];
+            step_j1_vel_count[joint_id] = 0;
+            vnull[joint_id] = (vel_target_j1[joint_id] == 0)? 1 : 0;
 			if (ctrl_type == 'p'){
-				check_velocity_pos();
+				check_velocity_pos(joint_id);
     		}
 			if (ctrl_type == 'v'){
-				check_velocity_vel();
+				check_velocity(joint_id);
     		}
         }
     }
-    if (vnull && change_dir){ //if there is a change in direction taking place, and the velocity is null, the deacceleration has finished
-        dir_j1 = dir_tmp_j1;
-        targ_dir_j1 = dir_tmp_j1;
-        change_dir = 0;
-        step_j1_vel_count = 0;
-        vel_target_j1 = vel_temp_j1;
-        vnull = 0;
+    if (vnull[joint_id] && change_dir[joint_id]){ //if there is a change in direction taking place, and the velocity is null, the deacceleration has finished
+        dir_j1[joint_id] = dir_tmp_j1[joint_id];
+        targ_dir_j1[joint_id] = dir_tmp_j1[joint_id];
+        change_dir[joint_id] = 0;
+        step_j1_vel_count[joint_id] = 0;
+        vel_target_j1[joint_id] = vel_temp_j1[joint_id];
+        vnull[joint_id] = 0;
     }
-    step_j1_vel_count += 1;
+    step_j1_vel_count[joint_id] += 1;
 }
 
 /*
@@ -430,19 +432,20 @@ check velocity
 
 Determines if, given the current velocity, and while in velocity control mode, the motor needs to start deaccelerating to stop at the absolute maximum or minimum limits.
 */
-void check_velocity_vel(void){
-    if (calibrated){
-        remaining_steps = (int) ceil((float) velocity_j1 / (float) DELTAVEL_STEP); // determines hoy many velocity changes are needed to stop moving
-        steps_to_limit = (int) (dir_j1 == 0)? floor((MAX_LIMIT_POS - curr_pos_j1) / STEP_DOWNS) : ceil((curr_pos_j1 - MIN_LIMIT_POS) / STEP_DOWNS); //determines how many multiples of the quantity of steps between every velocity change, are there between the current position and the maximum or minimum limit.
-        vel_target_j1 = (remaining_steps >= (steps_to_limit))? vel_target_j1 - DELTAVEL_STEP : vel_target_j1;	
+
+void check_velocity(int joint_id){
+    if (calibrated[joint_id]){
+        remaining_steps[joint_id] = (int) ceil((float) velocity[joint_id] / (float) DELTAVEL_STEP); // determines hoy many velocity changes are needed to stop moving
+        steps_to_limit[joint_id] = (int) (dir_j1[joint_id] == 0)? floor((max_limit_pos[joint_id] - curr_pos_j1[joint_id]) / STEP_DOWNS) : ceil((curr_pos_j1[joint_id] - min_limit_pos[joint_id]) / STEP_DOWNS); //determines how many multiples of the quantity of steps between every velocity change, are there between the current position and the maximum or minimum limit.
+        vel_target_j1[joint_id] = (remaining_steps[joint_id] >= (steps_to_limit[joint_id]))? vel_target_j1[joint_id] - DELTAVEL_STEP : vel_target_j1[joint_id];	
         #ifdef DEBUG
-        if (vel_target_j1 == 0){
+        if (vel_target_j1[joint_id] == 0){
             gpio_set(GPIOD, GPIO12);
         }
         else{
             gpio_clear(GPIOD, GPIO12);
         }
-        #endif 
+        #endif
     }
 }
 
@@ -452,24 +455,24 @@ check_velocity_pos
 Determines if, given the current velocity, and while in position control mode, the motor needs to start deaccelerating to stop at the target position.
 */
 
-void check_velocity_pos(void){
-    if (calibrated){
-        remaining_steps = (int) ceil((float) velocity_j1 / (float) DELTAVEL_STEP);// determines hoy many velocity changes are needed to stop moving
-        if (change_dir == 0){
-            steps_to_limit = (int) (dir_j1 == 0)? floor((targ_pos_j1 - curr_pos_j1) / STEP_DOWNS) : ceil((curr_pos_j1 - targ_pos_j1) / STEP_DOWNS);//determines how many multiples of the quantity of steps between every velocity change, are there between the current position and the target position, if no change in rotation sense is detected.
+void check_velocity_pos(int joint_id){
+    if (calibrated[joint_id]){
+        remaining_steps[joint_id] = (int) ceil((float) velocity[joint_id] / (float) DELTAVEL_STEP); // determines hoy many velocity changes are needed to stop moving
+        if (change_dir[joint_id] == 0){
+            steps_to_limit[joint_id] = (int) (dir_j1[joint_id] == 0)? floor((targ_pos_j1[joint_id] - curr_pos_j1[joint_id]) / STEP_DOWNS) : ceil((curr_pos_j1[joint_id] - targ_pos_j1[joint_id]) / STEP_DOWNS);//determines how many multiples of the quantity of steps between every velocity change, are there between the current position and the target position, if no change in rotation sense is detected.
         }
         else {
-            steps_to_limit = (int) (dir_j1 == 1)? floor((targ_pos_j1 - curr_pos_j1) / STEP_DOWNS) : ceil((curr_pos_j1 - targ_pos_j1) / STEP_DOWNS);//determines how many multiples of the quantity of steps between every velocity change, are there between the current position and the target position, if a change in rotation sense is ongoing.
+            steps_to_limit[joint_id] = (int) (dir_j1[joint_id] == 1)? floor((targ_pos_j1[joint_id] - curr_pos_j1[joint_id]) / STEP_DOWNS) : ceil((curr_pos_j1[joint_id] - targ_pos_j1[joint_id]) / STEP_DOWNS);//determines how many multiples of the quantity of steps between every velocity change, are there between the current position and the target position, if a change in rotation sense is ongoing.
         }
-            vel_target_j1 = ((remaining_steps) >= (ABS(steps_to_limit)+1))? velocity_j1 - DELTAVEL_STEP : vel_target_j1;
+            vel_target_j1[joint_id] = ((remaining_steps[joint_id]) >= (ABS(steps_to_limit[joint_id])+1))? velocity[joint_id] - DELTAVEL_STEP : vel_target_j1[joint_id];
         #ifdef DEBUG
-        if (vel_target_j1 == 0){
+        if (vel_target_j1[joint_id] == 0){
             gpio_set(GPIOD, GPIO12);
         }
         else{
             gpio_clear(GPIOD, GPIO12);
         }
-        #endif 
+        #endif
     }
 }
 
@@ -479,25 +482,25 @@ position_control
 Sets the required variables for position control mode operation. Checks if a change in rotation direction happens so that the motor deaccelerates in the current direction.
 */
 
-void position_control(void){
-    if (dir_j1 != targ_dir_j1){
-        dir_tmp_j1 = targ_dir_j1;
-        targ_dir_j1 = dir_j1;
-        change_dir = 1;
-        vel_temp_j1 = vel_target_j1;
-        vel_target_j1 = 0;
+void position_control(int joint_id){
+    if (dir_j1[joint_id] != targ_dir_j1[joint_id]){
+        dir_tmp_j1[joint_id] = targ_dir_j1[joint_id];
+        targ_dir_j1[joint_id] = dir_j1[joint_id];
+        change_dir[joint_id] = 1;
+        vel_temp_j1[joint_id] = vel_target_j1[joint_id];
+        vel_target_j1[joint_id] = 0;
     }
     else{
-        if (curr_pos_j1 > targ_pos_j1 && change_dir != 1){
-            targ_dir_j1 = 1;
+        if (curr_pos_j1[joint_id] > targ_pos_j1[joint_id] && change_dir[joint_id] != 1){
+            targ_dir_j1[joint_id] = 1;
         }
-        else if (curr_pos_j1 < targ_pos_j1 && change_dir != 1){
-            targ_dir_j1 = 0;
+        else if (curr_pos_j1[joint_id] < targ_pos_j1[joint_id] && change_dir[joint_id] != 1){
+            targ_dir_j1[joint_id] = 0;
         }
-        else if(curr_pos_j1 == targ_pos_j1){
-            velocity_j1 = 0;
-            vel_target_j1 = 0;
-            tim_count_j1 = 1;
+        else if(curr_pos_j1[joint_id] == targ_pos_j1[joint_id]){
+            velocity[joint_id] = 0;
+            vel_target_j1[joint_id] = 0;
+            tim_count_j1[joint_id] = 1;
         }
     }
 }
@@ -508,20 +511,20 @@ velocity_control
 Sets the required variables for velocity control mode operation. Checks if a change in rotation direction happens so that the motor deaccelerates in the current direction. Stops the rotation entirely if a maximum or minimum limit is reached.
 */
 
-void velocity_control(void){
-    if (dir_j1 != targ_dir_j1){
-        dir_tmp_j1 = targ_dir_j1;
-        targ_dir_j1 = dir_j1;
-        change_dir = 1;
-        vel_temp_j1 = vel_target_j1;
-        vel_target_j1 = 0;
+void velocity_control(int joint_id){
+    if (dir_j1[joint_id] != targ_dir_j1[joint_id]){
+        dir_tmp_j1[joint_id] = targ_dir_j1[joint_id];
+        targ_dir_j1[joint_id] = dir_j1[joint_id];
+        change_dir[joint_id] = 1;
+        vel_temp_j1[joint_id] = vel_target_j1[joint_id];
+        vel_target_j1[joint_id] = 0;
     }
     else{
-	    if ((velocity_j1 != 0) && (curr_pos_j1 == MAX_LIMIT_POS) && (dir_j1 == 0)){
-	        velocity_j1 = 0;
+	    if ((velocity[joint_id] != 0) && (curr_pos_j1[joint_id] == max_limit_pos[joint_id]) && (dir_j1[joint_id] == 0)){
+	        velocity[joint_id] = 0;
 		}
-		if ((velocity_j1 != 0) && (curr_pos_j1 == MIN_LIMIT_POS) && (dir_j1 == 1)){
-			velocity_j1 = 0;
+		if ((velocity[joint_id] != 0) && (curr_pos_j1[joint_id] == max_limit_pos[joint_id]) && (dir_j1[joint_id] == 1)){
+			velocity[joint_id] = 0;
 		}
     }
 }
@@ -539,44 +542,60 @@ Executes the time based interruption.
 void tim1_up_tim10_isr(void) {
     timer_clear_flag(TIM1,  TIM_SR_UIF); // Clear the update interrupt flag
 
+    int joint_id;  
+
     if (enbl == 1){
-        gpio_set(EN_PORT, EN_PIN);
+        for(joint_id = 0; joint_id < NUM_JOINTS; joint_id++){
+            gpio_set(en_port[joint_id], en_pin[joint_id]);
+        }
         enbl = 0;
     }
     
     if (denbl == 1){
-        gpio_clear(EN_PORT, EN_PIN);
+         for(joint_id = 0; joint_id < NUM_JOINTS; joint_id++){
+             gpio_clear(en_port[joint_id], en_pin[joint_id]);
+         }
         denbl = 0;
     }
 
-    if (dir == 1){
-        dir_j1 = (dir_j1 == 1)? 0 : 1;
-        dir = 0;
-    }
+    for (joint_id = 0; joint_id < NUM_JOINTS; joint_id++) {
 
-    if (calibrate){
-        calibration_j1();
-    }
 
-    if (ctrl_type == 'p'){
-        position_control();
-    }
+        if (dir == 1){
+            dir_j1[joint_id] = (dir_j1[joint_id] == 1)? 0 : 1;
+            dir = 0;
+        }
 
-    if (ctrl_type == 'v'){
-        velocity_control();
-    }
+        if (calibrate){
+            calibration(joint_id);
+        }
 
-    if (calibrated){
-        establish_direction();
-        lower_step();
-        set_step_j1();
-        change_velocity();
+        if (ctrl_type == 'p'){
+            position_control(joint_id);
+        }
+
+        if (ctrl_type == 'v'){
+            velocity_control(joint_id);
+        }
+
+        if (calibrated[joint_id]){
+            establish_direction(joint_id);
+            lower_step(joint_id);
+            set_step(joint_id);
+            change_velocity(joint_id);
+        }
     }
 }
 
 /* End timer functions */
 
 /* Init util functions */
+
+/*
+main
+
+Polls the PC via serial communication to set the control variables needed to determine the operation of the control.
+*/
 
 void read_serial(char* buffer){
     int i = 0;
@@ -596,36 +615,36 @@ void read_serial(char* buffer){
 
 /* Main function */
 
-/*
-main
-
-Polls the PC via serial communication to set the control variables needed to determine the operation of the control.
-*/
-
 int main(void){
     char cmd_s[MSG_SIZE]=" ";
     system_init();
     char ctrl_sel = 't';
     int val1 = 0;
     int val2 = 0;
+    int val3 = 0;
+    int val4 = 0;
 
     //init values
     enbl = 0;
     denbl = 0;
     dir = 0;
-    vnull = 1;
-    change_dir = 0;
-    dir_j1 = 0;
-    dir_tmp_j1 = 0;
-    targ_dir_j1 = 0;
+    
+    int joint_id;
 
-    gpio_clear(EN_PORT, EN_PIN);
-    gpio_clear(STEP_PORT, STEP_PIN);
+    for(joint_id = 0; joint_id < NUM_JOINTS; joint_id ++) {   
+        vnull[joint_id] = 1;
+        change_dir[joint_id] = 0;
+        dir_j1[joint_id] = 0;
+        dir_tmp_j1[joint_id] = 0;
+        targ_dir_j1[joint_id] = 0;
+        gpio_clear(en_port[joint_id], en_pin[joint_id]);
+        gpio_clear(step_port[joint_id], step_pin[joint_id]);
+    }
 
     while(true) {
         if ((poll(stdin) > 0)) {
             read_serial(cmd_s);
-            sscanf(cmd_s, "%c %d %d\n", &ctrl_sel, &val1, &val2);
+            sscanf(cmd_s, "%c %d %d %d %d\n", &ctrl_sel, &val1, &val2, &val3, &val4);
 
             // enable pantilt
             if (ctrl_sel == 'e') {
@@ -636,7 +655,8 @@ int main(void){
             if (ctrl_sel == 'o') {
 	            denbl = 1;
                 calibrate = 0;
-                calibrated = 0;
+                calibrated[JOINT1] = 0;
+                calibrated[JOINT2] = 0;
             }
 	        // change dir
 	        if (ctrl_sel == 'd'){
@@ -651,18 +671,22 @@ int main(void){
 			//sets variables to execute position control
             if (ctrl_sel == 'p') {
                 ctrl_type = ctrl_sel;
-                targ_pos_j1 = val1;
-                vel_target_j1 = DELTAVEL_LIM;
-            }   
-			
+                targ_pos_j1[JOINT1] = val1;
+                targ_pos_j1[JOINT2] = val2;
+                vel_target_j1[JOINT1] = DELTAVEL_LIM;
+                vel_target_j1[JOINT2] = DELTAVEL_LIM;
+            }        
+
 			//sets variables to execute velocity control
             if (ctrl_sel == 'v') {
                 ctrl_type = ctrl_sel;
-                vel_target_j1 = val1;
-                targ_dir_j1 = val2; 
+                vel_target_j1[JOINT1] = val1;
+                vel_target_j1[JOINT2] = val3;
+                targ_dir_j1[JOINT1] = val2;
+                targ_dir_j1[JOINT2] = val4; 
             }
         }
-    	printf("step: %d vel_j1: %d remaining_steps: %d steps_to_limit %d curr_pos: %d change_dir: %d vel_target: %d \n", step_j1, velocity_j1, remaining_steps, steps_to_limit, curr_pos_j1, change_dir, vel_target_j1);
+    	printf("step: %d vel_j1: %d remaining_steps: %d steps_to_limit %d curr_pos: %d change_dir: %d vel_target: %d \n", step_j[JOINT1], velocity[JOINT1], remaining_steps[JOINT1], steps_to_limit[JOINT1], curr_pos_j1[JOINT1], change_dir[JOINT1], vel_target_j1[JOINT1]);
     }
     return(0);
 }

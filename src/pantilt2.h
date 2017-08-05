@@ -36,16 +36,16 @@ void gpio_init(void);
 void tim_init(void);
 void serial_conf(void);
 
-void calibration_j1(void);
-void control_posicion(void);
-void control_velocidad(void);
-void decr_velocidad_j1(void);
-void cambiar_velocidad(void);
-void check_velocidad(void);
-void check_velocidad_pos(void);
-void establecer_direccion(void);
-void bajar_step(void);
-void calculo_step_j1(void);
+void calibration(int joint_id);
+void position_control(int joint_id);
+void velocity_control(int joint_id);
+void decr_velocidad_j1(int joint_id);
+void change_velocity(int joint_id);
+void check_velocity(int joint_id);
+void check_velocity_pos(int joint_id);
+void establish_direction(int joint_id);
+void lower_step(int joint_id);
+void set_step(int joint_id);
 
 void read_serial(char* buffer);
 
